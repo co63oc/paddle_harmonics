@@ -1,4 +1,10 @@
-Code from <https://github.com/NVIDIA/torch-harmonics>
+# paddle_harmonics(Paddle Backend)
+
+> [!IMPORTANT]
+> This branch(paddle) experimentally supports [Paddle backend](https://www.paddlepaddle.org.cn/en/install/quick?docurl=/documentation/docs/en/develop/install/pip/linux-pip_en.html)
+> as almost all the core code has been completely rewritten using the Paddle API.
+>
+> It is recommended to install **nightly-build(develop)** Paddle before running any code in this branch.
 
 Install:
 
@@ -17,4 +23,8 @@ mkdir examples/checkpoints
 mkdir examples/figures
 mkdir examples/output_data
 python examples/train_sfno.py
+
+# notebooks
+mkdir notebooks/data
+chmod a+rwx notebooks/data
 ```

@@ -125,5 +125,5 @@ def bmm_fix(x, y):
 
 def norm_complex(x, p, axis):
     if x.dtype == paddle.complex64 or x.dtype == paddle.complex128:
-        return paddle.to_tensor(np.linalg.norm(x.numpy(), ord=p, axis=axis))
-    return paddle.linalg.norm(x, ord, axis)
+        return paddle.linalg.norm(x.abs(), p, axis)
+    return paddle.linalg.norm(x, p, axis)

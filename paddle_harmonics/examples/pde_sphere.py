@@ -85,7 +85,7 @@ class SphereSolver(nn.Layer):
         self.mmax = self.sht.mmax
 
         l = paddle.arange(0, self.lmax).reshape(self.lmax, 1).astype(paddle.complex128)
-        l = l.expand(self.lmax, self.mmax)
+        l = l.expand([self.lmax, self.mmax])
         # the laplace operator acting on the coefficients is given by l (l + 1)
         lap = -l * (l + 1) / self.radius**2
         invlap = -self.radius**2 / l / (l + 1)

@@ -26,5 +26,7 @@ python examples/train_sfno.py
 
 # notebooks
 mkdir notebooks/data
+mkdir notebooks/plots
 chmod a+rwx notebooks/data
+chmod a+rwx notebooks/plots
 ```

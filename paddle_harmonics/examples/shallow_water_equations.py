@@ -239,7 +239,7 @@ class ShallowWaterSolver(nn.Layer):
         )
 
         # intial velocity field
-        ugrid = paddle.stack((ugrid, vgrid))
+        ugrid = paddle.stack((ugrid, vgrid.astype(ugrid.dtype)))
         # intial vorticity/divergence field
         vrtdivspec = self.vrtdivspec(ugrid)
         vrtdivgrid = self.spec2grid(vrtdivspec)

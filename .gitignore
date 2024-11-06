@@ -139,4 +139,5 @@ examples/output_data
 examples/wandb
 wandb
 notebooks/data
+notebooks/plots
 notebooks/*.gif

@@ -2,7 +2,7 @@
 
 # SPDX-FileCopyrightText: Copyright (c) 2022 The torch-harmonics Authors. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -30,20 +30,22 @@
 #
 
 
+import numpy as np
 import paddle
 import paddle.nn as nn
+
 import paddle_harmonics as harmonics
 
-import numpy as np
 
-
-class SphereSolver(nn.Module):
+class SphereSolver(nn.Layer):
     """
     Solver class on the sphere. Can solve the following PDEs:
     - Allen-Cahn eq
     """
 
-    def __init__(self, nlat, nlon, dt, lmax=None, mmax=None, grid='legendre-gauss', radius=1.0, coeff=0.001):
+    def __init__(
+        self, nlat, nlon, dt, lmax=None, mmax=None, grid="legendre-gauss", radius=1.0, coeff=0.001
+    ):
         super().__init__()
 
         # time stepping param
@@ -55,12 +57,14 @@ class SphereSolver(nn.Module):
         self.grid = grid
 
         # physical sonstants
-        self.register_buffer('radius', torch.as_tensor(radius, dtype=torch.float64))
-        self.register_buffer('coeff', torch.as_tensor(coeff, dtype=torch.float64))
+        self.register_buffer("radius", paddle.to_tensor(radius, dtype=paddle.float64))
+        self.register_buffer("coeff", paddle.to_tensor(coeff, dtype=paddle.float64))
 
         # SHT
         self.sht = harmonics.RealSHT(nlat, nlon, lmax=lmax, mmax=mmax, grid=grid, csphase=False)
-        self.isht = harmonics.InverseRealSHT(nlat, nlon, lmax=lmax, mmax=mmax, grid=grid, csphase=False)
+        self.isht = harmonics.InverseRealSHT(
+            nlat, nlon, lmax=lmax, mmax=mmax, grid=grid, csphase=False
+        )
 
         self.lmax = lmax or self.sht.lmax
         self.mmax = lmax or self.sht.mmax
@@ -74,29 +78,29 @@ class SphereSolver(nn.Module):
             cost, _ = harmonics.quadrature.clenshaw_curtiss_weights(self.nlat, -1, 1)
 
         # apply cosine transform and flip them
-        lats = -torch.as_tensor(np.arcsin(cost))
-        lons = torch.linspace(0, 2*np.pi, self.nlon+1, dtype=torch.float64)[:nlon]
+        lats = -paddle.to_tensor(np.arcsin(cost))
+        lons = paddle.linspace(0, 2 * np.pi, self.nlon + 1, dtype=paddle.float64)[:nlon]
 
         self.lmax = self.sht.lmax
         self.mmax = self.sht.mmax
 
-        l = torch.arange(0, self.lmax).reshape(self.lmax, 1).cdouble()
+        l = paddle.arange(0, self.lmax).reshape(self.lmax, 1).astype(paddle.complex128)
         l = l.expand(self.lmax, self.mmax)
         # the laplace operator acting on the coefficients is given by l (l + 1)
-        lap = - l * (l + 1) / self.radius**2
-        invlap = - self.radius**2 / l / (l + 1)
-        invlap[0] = 0.
+        lap = -l * (l + 1) / self.radius**2
+        invlap = -self.radius**2 / l / (l + 1)
+        invlap[0] = 0.0
 
         # register all
-        self.register_buffer('lats', lats)
-        self.register_buffer('lons', lons)
-        self.register_buffer('l', l)
-        self.register_buffer('lap', lap)
-        self.register_buffer('invlap', invlap)
+        self.register_buffer("lats", lats)
+        self.register_buffer("lons", lons)
+        self.register_buffer("l", l)
+        self.register_buffer("lap", lap)
+        self.register_buffer("invlap", invlap)
 
     def grid2spec(self, u):
         """spectral coefficients from spatial data"""
-        
+
         return self.sht(u)
 
     def spec2grid(self, uspec):
@@ -104,29 +108,38 @@ class SphereSolver(nn.Module):
 
         return self.isht(uspec)
 
-    def dudtspec(self, uspec, pde='allen-cahn'):
+    def dudtspec(self, uspec, pde="allen-cahn"):
 
-        if pde == 'allen-cahn':
+        if pde == "allen-cahn":
             ugrid = self.spec2grid(uspec)
-            u3spec  = self.grid2spec(ugrid**3)
-            dudtspec = self.coeff*self.lap*uspec + uspec - u3spec
-        elif pde == 'ginzburg-landau':
+            u3spec = self.grid2spec(ugrid**3)
+            dudtspec = self.coeff * self.lap * uspec + uspec - u3spec
+        elif pde == "ginzburg-landau":
             ugrid = self.spec2grid(uspec)
-            u3spec  = self.grid2spec(ugrid**3)
-            dudtspec = uspec + (1. + 2.j)*self.coeff*self.lap*uspec - (1. + 2.j)*u3spec
+            u3spec = self.grid2spec(ugrid**3)
+            dudtspec = uspec + (1.0 + 2.0j) * self.coeff * self.lap * uspec - (1.0 + 2.0j) * u3spec
         else:
             NotImplementedError
-        
+
         return dudtspec
 
     def randspec(self):
         """random data on the sphere"""
 
-        rspec = torch.randn_like(self.lap) / 4 / np.pi
+        rspec = paddle.randn(shape=self.lap.shape, dtype=self.lap.dtype) / 4 / np.pi
         return rspec
 
-
-    def plot_griddata(self, data, fig, cmap='twilight_shifted', vmax=None, vmin=None, projection='3d', title=None, antialiased=False):
+    def plot_griddata(
+        self,
+        data,
+        fig,
+        cmap="twilight_shifted",
+        vmax=None,
+        vmin=None,
+        projection="3d",
+        title=None,
+        antialiased=False,
+    ):
         """
         plotting routine for data on the grid. Requires cartopy for 3d plots.
         """
@@ -135,38 +148,47 @@ class SphereSolver(nn.Module):
         lons = self.lons.squeeze() - np.pi
         lats = self.lats.squeeze()
 
-        if data.is_cuda:
+        if data.place.is_gpu_place():
             data = data.cpu()
             lons = lons.cpu()
             lats = lats.cpu()
 
         Lons, Lats = np.meshgrid(lons, lats)
 
-        if projection == 'mollweide':
+        if projection == "mollweide":
 
-            #ax = plt.gca(projection=projection)
+            # ax = plt.gca(projection=projection)
             ax = fig.add_subplot(projection=projection)
             im = ax.pcolormesh(Lons, Lats, data, cmap=cmap, vmax=vmax, vmin=vmin)
             # ax.set_title("Elevation map of mars")
             ax.grid(True)
             ax.set_xticklabels([])
             ax.set_yticklabels([])
-            plt.colorbar(im, orientation='horizontal')
+            plt.colorbar(im, orientation="horizontal")
             plt.title(title)
 
-        elif projection == '3d':
+        elif projection == "3d":
 
             import cartopy.crs as ccrs
 
             proj = ccrs.Orthographic(central_longitude=0.0, central_latitude=25.0)
 
-            #ax = plt.gca(projection=proj, frameon=True)
+            # ax = plt.gca(projection=proj, frameon=True)
             ax = fig.add_subplot(projection=proj)
-            Lons = Lons*180/np.pi
-            Lats = Lats*180/np.pi
+            Lons = Lons * 180 / np.pi
+            Lats = Lats * 180 / np.pi
 
             # contour data over the map.
-            im = ax.pcolormesh(Lons, Lats, data, cmap=cmap, transform=ccrs.PlateCarree(), antialiased=antialiased, vmax=vmax, vmin=vmin)
+            im = ax.pcolormesh(
+                Lons,
+                Lats,
+                data,
+                cmap=cmap,
+                transform=ccrs.PlateCarree(),
+                antialiased=antialiased,
+                vmax=vmax,
+                vmin=vmin,
+            )
             plt.title(title, y=1.05)
 
         else:

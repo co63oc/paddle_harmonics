@@ -2,7 +2,7 @@
 
 # SPDX-FileCopyrightText: Copyright (c) 2022 The torch-harmonics Authors. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -31,14 +31,17 @@
 
 import numpy as np
 import paddle
-import paddle.nn as nn
 import paddle.fft
+import paddle.nn as nn
 
-from paddle_harmonics.quadrature import legendre_gauss_weights, lobatto_weights, clenshaw_curtiss_weights
-from paddle_harmonics.legendre import _precompute_legpoly, _precompute_dlegpoly
+from paddle_harmonics.legendre import _precompute_dlegpoly
+from paddle_harmonics.legendre import _precompute_legpoly
+from paddle_harmonics.quadrature import clenshaw_curtiss_weights
+from paddle_harmonics.quadrature import legendre_gauss_weights
+from paddle_harmonics.quadrature import lobatto_weights
 
 
-class RealSHT(nn.Module):
+class RealSHT(nn.Layer):
     r"""
     Defines a module for computing the forward (real-valued) SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -48,7 +51,9 @@ class RealSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
         r"""
         Initializes the SHT Layer, precomputing the necessary quadrature weights
 
@@ -74,60 +79,65 @@ class RealSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, w = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, w = clenshaw_curtiss_weights(nlat, -1, 1)
             # cost, w = fejer2_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # apply cosine transform and flip them
         tq = np.flip(np.arccos(cost))
 
-        # determine the dimensions 
+        # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
         # combine quadrature weights with the legendre weights
         weights = paddle.to_tensor(w)
         pct = _precompute_legpoly(self.mmax, self.lmax, tq, norm=self.norm, csphase=self.csphase)
         pct = paddle.to_tensor(pct)
-        weights = paddle.einsum('mlk,k->mlk', pct, weights)
+        weights = paddle.einsum("mlk,k->mlk", pct, weights)
 
         # remember quadrature weights
-        self.register_buffer('weights', weights, persistent=False)
+        self.register_buffer("weights", weights, persistable=False)
 
     def extra_repr(self):
         r"""
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
-        assert(x.shape[-2] == self.nlat)
-        assert(x.shape[-1] == self.nlon)
+        assert x.shape[-2] == self.nlat
+        assert x.shape[-1] == self.nlon
 
         # apply real fft in the longitudinal direction
-        x = 2.0 * np.pi * paddle.fft.rfft(x, dim=-1, norm="forward")
-        
+        x = 2.0 * np.pi * paddle.fft.rfft(x, axis=-1, norm="forward")
+
         # do the Legendre-Gauss quadrature
-        x = torch.view_as_real(x)
-        
+        x = paddle.as_real(x)
+
         # distributed contraction: fork
-        out_shape = list(x.size())
+        out_shape = list(x.shape)
         out_shape[-3] = self.lmax
         out_shape[-2] = self.mmax
-        xout = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
-        
+        xout = paddle.zeros(out_shape, dtype=x.dtype)
+
         # contraction
-        xout[..., 0] = paddle.einsum('...km,mlk->...lm', x[..., :self.mmax, 0], self.weights.to(x.dtype) )
-        xout[..., 1] = paddle.einsum('...km,mlk->...lm', x[..., :self.mmax, 1], self.weights.to(x.dtype) )
-        x = torch.view_as_complex(xout)
-        
+        xout[..., 0] = paddle.einsum(
+            "...km,mlk->...lm", x[..., : self.mmax, 0], self.weights.astype(x.dtype)
+        )
+        xout[..., 1] = paddle.einsum(
+            "...km,mlk->...lm", x[..., : self.mmax, 1], self.weights.astype(x.dtype)
+        )
+        x = paddle.as_complex(xout)
+
         return x
 
-class InverseRealSHT(nn.Module):
+
+class InverseRealSHT(nn.Layer):
     r"""
     Defines a module for computing the inverse (real-valued) SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -138,7 +148,9 @@ class InverseRealSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
 
         super().__init__()
 
@@ -154,51 +166,53 @@ class InverseRealSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, _ = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, _ = clenshaw_curtiss_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # apply cosine transform and flip them
         t = np.flip(np.arccos(cost))
 
-        # determine the dimensions 
+        # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
-        pct = _precompute_legpoly(self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase)
+        pct = _precompute_legpoly(
+            self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase
+        )
         pct = paddle.to_tensor(pct)
 
         # register buffer
-        self.register_buffer('pct', pct, persistent=False)
+        self.register_buffer("pct", pct, persistable=False)
 
     def extra_repr(self):
         r"""
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
-        assert(x.shape[-2] == self.lmax)
-        assert(x.shape[-1] == self.mmax)
-        
+        assert x.shape[-2] == self.lmax
+        assert x.shape[-1] == self.mmax
+
         # Evaluate associated Legendre functions on the output nodes
-        x = torch.view_as_real(x)
-        
-        rl = paddle.einsum('...lm, mlk->...km', x[..., 0], self.pct.to(x.dtype) )
-        im = paddle.einsum('...lm, mlk->...km', x[..., 1], self.pct.to(x.dtype) )
-        xs = torch.stack((rl, im), -1)
+        x = paddle.as_real(x)
+
+        rl = paddle.einsum("...lm, mlk->...km", x[..., 0], self.pct.astype(x.dtype))
+        im = paddle.einsum("...lm, mlk->...km", x[..., 1], self.pct.astype(x.dtype))
+        xs = paddle.stack((rl, im), -1)
 
         # apply the inverse (real) FFT
-        x = torch.view_as_complex(xs)
-        x = paddle.fft.irfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = paddle.as_complex(xs)
+        x = paddle.fft.irfft(x, n=self.nlon, axis=-1, norm="forward")
 
         return x
 
 
-class RealVectorSHT(nn.Module):
+class RealVectorSHT(nn.Layer):
     r"""
     Defines a module for computing the forward (real) vector SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -208,7 +222,9 @@ class RealVectorSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
         r"""
         Initializes the vector SHT Layer, precomputing the necessary quadrature weights
 
@@ -232,86 +248,101 @@ class RealVectorSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, w = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, w = clenshaw_curtiss_weights(nlat, -1, 1)
             # cost, w = fejer2_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # apply cosine transform and flip them
         tq = np.flip(np.arccos(cost))
 
-        # determine the dimensions 
+        # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
         weights = paddle.to_tensor(w)
         dpct = _precompute_dlegpoly(self.mmax, self.lmax, tq, norm=self.norm, csphase=self.csphase)
         dpct = paddle.to_tensor(dpct)
-        
+
         # combine integration weights, normalization factor in to one:
-        l = torch.arange(0, self.lmax)
-        norm_factor = 1. / l / (l+1)
-        norm_factor[0] = 1.
-        weights = paddle.einsum('dmlk,k,l->dmlk', dpct, weights, norm_factor)
+        l = paddle.arange(0, self.lmax).astype(dpct.dtype)
+        norm_factor = 1.0 / l / (l + 1)
+        norm_factor[0] = 1.0
+        weights = paddle.einsum("dmlk,k,l->dmlk", dpct, weights, norm_factor)
         # since the second component is imaginary, we need to take complex conjugation into account
         weights[1] = -1 * weights[1]
 
         # remember quadrature weights
-        self.register_buffer('weights', weights, persistent=False)
+        self.register_buffer("weights", weights, persistable=False)
 
     def extra_repr(self):
         r"""
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
-        assert(len(x.shape) >= 3)
+        assert len(x.shape) >= 3
 
         # apply real fft in the longitudinal direction
-        x = 2.0 * np.pi * paddle.fft.rfft(x, dim=-1, norm="forward")
-        
+        x = 2.0 * np.pi * paddle.fft.rfft(x, axis=-1, norm="forward")
+
         # do the Legendre-Gauss quadrature
-        x = torch.view_as_real(x)
-        
+        x = paddle.as_real(x)
+
         # distributed contraction: fork
-        out_shape = list(x.size())
+        out_shape = list(x.shape)
         out_shape[-3] = self.lmax
         out_shape[-2] = self.mmax
-        xout = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+        xout = paddle.zeros(out_shape, dtype=x.dtype)
 
         # contraction - spheroidal component
         # real component
-        xout[..., 0, :, :, 0] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :self.mmax, 0], self.weights[0].to(x.dtype)) \
-                                - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :self.mmax, 1], self.weights[1].to(x.dtype)) 
+        xout[..., 0, :, :, 0] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, : self.mmax, 0], self.weights[0].to(x.dtype)
+        ) - paddle.einsum(
+            "...km,mlk->...lm", x[..., 1, :, : self.mmax, 1], self.weights[1].to(x.dtype)
+        )
 
         # iamg component
-        xout[..., 0, :, :, 1] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :self.mmax, 1], self.weights[0].to(x.dtype)) \
-                                + paddle.einsum('...km,mlk->...lm', x[..., 1, :, :self.mmax, 0], self.weights[1].to(x.dtype)) 
+        xout[..., 0, :, :, 1] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, : self.mmax, 1], self.weights[0].to(x.dtype)
+        ) + paddle.einsum(
+            "...km,mlk->...lm", x[..., 1, :, : self.mmax, 0], self.weights[1].to(x.dtype)
+        )
 
         # contraction - toroidal component
         # real component
-        xout[..., 1, :, :, 0] = - paddle.einsum('...km,mlk->...lm', x[..., 0, :, :self.mmax, 1], self.weights[1].to(x.dtype)) \
-                                - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :self.mmax, 0], self.weights[0].to(x.dtype)) 
+        xout[..., 1, :, :, 0] = -paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, : self.mmax, 1], self.weights[1].to(x.dtype)
+        ) - paddle.einsum(
+            "...km,mlk->...lm", x[..., 1, :, : self.mmax, 0], self.weights[0].to(x.dtype)
+        )
         # imag component
-        xout[..., 1, :, :, 1] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :self.mmax, 0], self.weights[1].to(x.dtype)) \
-                                - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :self.mmax, 1], self.weights[0].to(x.dtype)) 
+        xout[..., 1, :, :, 1] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, : self.mmax, 0], self.weights[1].to(x.dtype)
+        ) - paddle.einsum(
+            "...km,mlk->...lm", x[..., 1, :, : self.mmax, 1], self.weights[0].to(x.dtype)
+        )
 
-        return torch.view_as_complex(xout)
+        return paddle.as_complex(xout)
 
 
-class InverseRealVectorSHT(nn.Module):
+class InverseRealVectorSHT(nn.Layer):
     r"""
     Defines a module for computing the inverse (real-valued) vector SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
-    
+
     [1] Schaeffer, N. Efficient spherical harmonic transforms aimed at pseudospectral numerical simulations, G3: Geochemistry, Geophysics, Geosystems.
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
 
         super().__init__()
 
@@ -327,62 +358,68 @@ class InverseRealVectorSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, _ = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, _ = clenshaw_curtiss_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # apply cosine transform and flip them
         t = np.flip(np.arccos(cost))
 
-        # determine the dimensions 
+        # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
-        dpct = _precompute_dlegpoly(self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase)
+        dpct = _precompute_dlegpoly(
+            self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase
+        )
         dpct = paddle.to_tensor(dpct)
 
         # register weights
-        self.register_buffer('dpct', dpct, persistent=False)
+        self.register_buffer("dpct", dpct, persistable=False)
 
     def extra_repr(self):
         r"""
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
-        assert(x.shape[-2] == self.lmax)
-        assert(x.shape[-1] == self.mmax)
-        
+        assert x.shape[-2] == self.lmax
+        assert x.shape[-1] == self.mmax
+
         # Evaluate associated Legendre functions on the output nodes
-        x = torch.view_as_real(x)
+        x = paddle.as_real(x)
 
         # contraction - spheroidal component
         # real component
-        srl =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 0], self.dpct[0].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 1], self.dpct[1].to(x.dtype)) 
+        srl = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 0], self.dpct[0].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 1], self.dpct[1].to(x.dtype))
         # iamg component
-        sim =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 1], self.dpct[0].to(x.dtype)) \
-              + paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 0], self.dpct[1].to(x.dtype)) 
+        sim = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 1], self.dpct[0].to(x.dtype)
+        ) + paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 0], self.dpct[1].to(x.dtype))
 
         # contraction - toroidal component
         # real component
-        trl = - paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 1], self.dpct[1].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 0], self.dpct[0].to(x.dtype)) 
+        trl = -paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 1], self.dpct[1].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 0], self.dpct[0].to(x.dtype))
         # imag component
-        tim =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 0], self.dpct[1].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 1], self.dpct[0].to(x.dtype)) 
-        
+        tim = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 0], self.dpct[1].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 1], self.dpct[0].to(x.dtype))
+
         # reassemble
-        s = torch.stack((srl, sim), -1)
-        t = torch.stack((trl, tim), -1)
-        xs = torch.stack((s, t), -4)
+        s = paddle.stack((srl, sim), -1)
+        t = paddle.stack((trl, tim), -1)
+        xs = paddle.stack((s, t), -4)
 
         # apply the inverse (real) FFT
-        x = torch.view_as_complex(xs)
-        x = paddle.fft.irfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = paddle.as_complex(xs)
+        x = paddle.fft.irfft(x, n=self.nlon, axis=-1, norm="forward")
 
         return x

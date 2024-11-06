@@ -2,7 +2,7 @@
 
 # SPDX-FileCopyrightText: Copyright (c) 2022 The torch-harmonics Authors. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -30,20 +30,33 @@
 #
 
 import paddle
+
+from paddle_harmonics.utils import paddle_aux  # noqa, for view
+
 from .sht import InverseRealSHT
 
-class GaussianRandomFieldS2(torch.nn.Module):
-    def __init__(self, nlat, alpha=2.0, tau=3.0, sigma=None, radius=1.0, grid="equiangular", dtype=torch.float32):
+
+class GaussianRandomFieldS2(paddle.nn.Layer):
+    def __init__(
+        self,
+        nlat,
+        alpha=2.0,
+        tau=3.0,
+        sigma=None,
+        radius=1.0,
+        grid="equiangular",
+        dtype=paddle.float32,
+    ):
         super().__init__()
         r"""
         A mean-zero Gaussian Random Field on the sphere with Matern covariance:
         C = sigma^2 (-Lap + tau^2 I)^(-alpha).
-        
+
         Lap is the Laplacian on the sphere, I the identity operator,
         and sigma, tau, alpha are scalar parameters.
 
         Note: C is trace-class on L^2 if and only if alpha > 1.
-    
+
         Parameters
         ----------
         nlat : int
@@ -61,42 +74,48 @@ class GaussianRandomFieldS2(torch.nn.Module):
         grid : string, default is "equiangular"
             Grid type. Currently supports "equiangular" and
             "legendre-gauss".
-        dtype : torch.dtype, default is torch.float32
+        dtype : paddle.dtype, default is paddle.float32
             Numerical type for the calculations.
         """
 
-        #Number of latitudinal modes.
+        # Number of latitudinal modes.
         self.nlat = nlat
 
-        #Default value of sigma if None is given.
+        # Default value of sigma if None is given.
         if sigma is None:
             assert alpha > 1.0, f"Alpha must be greater than one, got {alpha}."
-            sigma = tau**(0.5*(2*alpha - 2.0))
+            sigma = tau ** (0.5 * (2 * alpha - 2.0))
 
         # Inverse SHT
-        self.isht = InverseRealSHT(self.nlat, 2*self.nlat, grid=grid, norm='backward').to(dtype=dtype)
+        self.isht = InverseRealSHT(self.nlat, 2 * self.nlat, grid=grid, norm="backward").to(
+            dtype=dtype
+        )
 
-        #Square root of the eigenvalues of C.
-        sqrt_eig = torch.tensor([j*(j+1) for j in range(self.nlat)]).view(self.nlat,1).repeat(1, self.nlat+1)
-        sqrt_eig = torch.tril(sigma*(((sqrt_eig/radius**2) + tau**2)**(-alpha/2.0)))
-        sqrt_eig[0,0] = 0.0
+        # Square root of the eigenvalues of C.
+        sqrt_eig = (
+            paddle.to_tensor([j * (j + 1) for j in range(self.nlat)])
+            .view(self.nlat, 1)
+            .tile(repeat_times=[1, self.nlat + 1])
+        )
+        sqrt_eig = paddle.tril(sigma * (((sqrt_eig / radius**2) + tau**2) ** (-alpha / 2.0)))
+        sqrt_eig[0, 0] = 0.0
         sqrt_eig = sqrt_eig.unsqueeze(0)
-        self.register_buffer('sqrt_eig', sqrt_eig)
+        self.register_buffer("sqrt_eig", sqrt_eig)
 
-        #Save mean and var of the standard Gaussian.
-        #Need these to re-initialize distribution on a new device.
-        mean = torch.tensor([0.0]).to(dtype=dtype)
-        var = torch.tensor([1.0]).to(dtype=dtype)
-        self.register_buffer('mean', mean)
-        self.register_buffer('var', var)
+        # Save mean and var of the standard Gaussian.
+        # Need these to re-initialize distribution on a new device.
+        mean = paddle.to_tensor([0.0]).to(dtype=dtype)
+        var = paddle.to_tensor([1.0]).to(dtype=dtype)
+        self.register_buffer("mean", mean)
+        self.register_buffer("var", var)
 
-        #Standard normal noise sampler.
-        self.gaussian_noise = torch.distributions.normal.Normal(self.mean, self.var)
+        # Standard normal noise sampler.
+        self.gaussian_noise = paddle.distribution.Normal(loc=self.mean, scale=self.var)
 
     def forward(self, N, xi=None):
         r"""
         Sample random functions from a spherical GRF.
-    
+
         Parameters
         ----------
         N : int
@@ -105,33 +124,33 @@ class GaussianRandomFieldS2(torch.nn.Module):
             Noise is a complex tensor of size (N, nlat, nlat+1).
             If None, new Gaussian noise is sampled.
             If xi is provided, N is ignored.
-        
+
         Output
         -------
         u : paddle.Tensor
-           N random samples from the GRF returned as a 
+           N random samples from the GRF returned as a
            tensor of size (N, nlat, 2*nlat) on a equiangular grid.
         """
-        #Sample Gaussian noise.
+        # Sample Gaussian noise.
         if xi is None:
-            xi = self.gaussian_noise.sample(torch.Size((N, self.nlat, self.nlat + 1, 2))).squeeze()
-            xi = torch.view_as_complex(xi)
-        
-        #Karhunen-Loeve expansion.
-        u = self.isht(xi*self.sqrt_eig)
-        
+            xi = self.gaussian_noise.sample(tuple((N, self.nlat, self.nlat + 1, 2))).squeeze()
+            xi = paddle.as_complex(xi)
+
+        # Karhunen-Loeve expansion.
+        u = self.isht(xi * self.sqrt_eig)
+
         return u
-    
-    #Override cuda and to methods so sampler gets initialized with mean
-    #and variance on the correct device.
+
+    # Override cuda and to methods so sampler gets initialized with mean
+    # and variance on the correct device.
     def cuda(self, *args, **kwargs):
         super().cuda(*args, **kwargs)
-        self.gaussian_noise = torch.distributions.normal.Normal(self.mean, self.var)
+        self.gaussian_noise = paddle.distribution.Normal(loc=self.mean, scale=self.var)
 
         return self
-    
+
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.gaussian_noise = torch.distributions.normal.Normal(self.mean, self.var)
+        self.gaussian_noise = paddle.distribution.Normal(loc=self.mean, scale=self.var)
 
         return self

@@ -29,21 +29,28 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-import os
 import numpy as np
 import paddle
-import paddle.nn as nn
 import paddle.fft
-import paddle.nn.functional as F
+import paddle.nn as nn
+import paddle.nn.functional as F  # noqa
 
-from paddle_harmonics.quadrature import legendre_gauss_weights, lobatto_weights, clenshaw_curtiss_weights
-from paddle_harmonics.legendre import _precompute_legpoly, _precompute_dlegpoly
-from paddle_harmonics.distributed import polar_group_size, azimuth_group_size, distributed_transpose_azimuth, distributed_transpose_polar
-from paddle_harmonics.distributed import polar_group_rank, azimuth_group_rank
-from paddle_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
+from paddle_harmonics.distributed import azimuth_group_rank
+from paddle_harmonics.distributed import azimuth_group_size
+from paddle_harmonics.distributed import compute_split_shapes
+from paddle_harmonics.distributed import distributed_transpose_azimuth
+from paddle_harmonics.distributed import distributed_transpose_polar
+from paddle_harmonics.distributed import polar_group_rank
+from paddle_harmonics.distributed import polar_group_size
+from paddle_harmonics.distributed import split_tensor_along_dim
+from paddle_harmonics.legendre import _precompute_dlegpoly
+from paddle_harmonics.legendre import _precompute_legpoly
+from paddle_harmonics.quadrature import clenshaw_curtiss_weights
+from paddle_harmonics.quadrature import legendre_gauss_weights
+from paddle_harmonics.quadrature import lobatto_weights
 
 
-class DistributedRealSHT(nn.Module):
+class DistributedRealSHT(nn.Layer):
     """
     Defines a module for computing the forward (real-valued) SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -53,7 +60,9 @@ class DistributedRealSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
         """
         Initializes the SHT Layer, precomputing the necessary quadrature weights
 
@@ -79,13 +88,13 @@ class DistributedRealSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, w = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, w = clenshaw_curtiss_weights(nlat, -1, 1)
             # cost, w = fejer2_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # get the comms grid:
         self.comm_size_polar = polar_group_size()
@@ -108,35 +117,37 @@ class DistributedRealSHT(nn.Module):
         # combine quadrature weights with the legendre weights
         weights = paddle.to_tensor(w)
         pct = _precompute_legpoly(self.mmax, self.lmax, tq, norm=self.norm, csphase=self.csphase)
-        pct = paddle.to_tensor(pct)        
-        weights = paddle.einsum('mlk,k->mlk', pct, weights)
-        
+        pct = paddle.to_tensor(pct)
+        weights = paddle.einsum("mlk,k->mlk", pct, weights)
+
         # split weights
-        weights = split_tensor_along_dim(weights, dim=0, num_chunks=self.comm_size_azimuth)[self.comm_rank_azimuth]
+        weights = split_tensor_along_dim(weights, dim=0, num_chunks=self.comm_size_azimuth)[
+            self.comm_rank_azimuth
+        ]
 
         # remember quadrature weights
-        self.register_buffer('weights', weights, persistent=False)
+        self.register_buffer("weights", weights, persistable=False)
 
     def extra_repr(self):
         """
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
         # we need to ensure that we can split the channels evenly
         num_chans = x.shape[1]
-        
+
         # h and w is split. First we make w local by transposing into channel dim
         if self.comm_size_azimuth > 1:
             x = distributed_transpose_azimuth.apply(x, (1, -1), self.lon_shapes)
 
         # apply real fft in the longitudinal direction: make sure to truncate to nlon
-        x = 2.0 * np.pi * paddle.fft.rfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = 2.0 * np.pi * paddle.fft.rfft(x, n=self.nlon, axis=-1, norm="forward")
 
         # truncate
-        x = x[..., :self.mmax]
+        x = x[..., : self.mmax]
 
         # transpose: after this, m is split and c is local
         if self.comm_size_azimuth > 1:
@@ -148,23 +159,23 @@ class DistributedRealSHT(nn.Module):
             x = distributed_transpose_polar.apply(x, (1, -2), self.lat_shapes)
 
         # do the Legendre-Gauss quadrature
-        x = torch.view_as_real(x)
+        x = paddle.as_real(x)
 
         # contraction
-        xs = paddle.einsum('...kmr,mlk->...lmr', x, self.weights.to(x.dtype)).contiguous()
+        xs = paddle.einsum("...kmr,mlk->...lmr", x, self.weights.to(x.dtype)).contiguous()
 
         # cast to complex
-        x = torch.view_as_complex(xs)
+        x = paddle.as_complex(xs)
 
         # transpose: after this, l is split and c is local
-        if self.comm_size_polar	> 1:
+        if self.comm_size_polar > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_polar)
             x = distributed_transpose_polar.apply(x, (-2, 1), chan_shapes)
-            
+
         return x
 
 
-class DistributedInverseRealSHT(nn.Module):
+class DistributedInverseRealSHT(nn.Layer):
     """
     Defines a module for computing the inverse (real-valued) SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -175,7 +186,9 @@ class DistributedInverseRealSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
 
         super().__init__()
 
@@ -191,12 +204,12 @@ class DistributedInverseRealSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, _ = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, _ = clenshaw_curtiss_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # get the comms grid:
         self.comm_size_polar = polar_group_size()
@@ -210,27 +223,31 @@ class DistributedInverseRealSHT(nn.Module):
         # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
-        # compute splits 
+        # compute splits
         self.lat_shapes = compute_split_shapes(self.nlat, self.comm_size_polar)
         self.lon_shapes = compute_split_shapes(self.nlon, self.comm_size_azimuth)
         self.l_shapes = compute_split_shapes(self.lmax, self.comm_size_polar)
         self.m_shapes = compute_split_shapes(self.mmax, self.comm_size_azimuth)
 
         # compute legende polynomials
-        pct = _precompute_legpoly(self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase)
+        pct = _precompute_legpoly(
+            self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase
+        )
         pct = paddle.to_tensor(pct)
 
         # split in m
-        pct = split_tensor_along_dim(pct, dim=0, num_chunks=self.comm_size_azimuth)[self.comm_rank_azimuth]
+        pct = split_tensor_along_dim(pct, dim=0, num_chunks=self.comm_size_azimuth)[
+            self.comm_rank_azimuth
+        ]
 
         # register
-        self.register_buffer('pct', pct, persistent=False)
+        self.register_buffer("pct", pct, persistable=False)
 
     def extra_repr(self):
         """
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
@@ -242,16 +259,16 @@ class DistributedInverseRealSHT(nn.Module):
             x = distributed_transpose_polar.apply(x, (1, -2), self.l_shapes)
 
         # Evaluate associated Legendre functions on the output nodes
-        x = torch.view_as_real(x)
+        x = paddle.as_real(x)
 
         # einsum
-        xs = paddle.einsum('...lmr, mlk->...kmr', x, self.pct.to(x.dtype)).contiguous()
-        #rl = paddle.einsum('...lm, mlk->...km', x[..., 0], self.pct.to(x.dtype) )
-        #im = paddle.einsum('...lm, mlk->...km', x[..., 1], self.pct.to(x.dtype) )
-        #xs = torch.stack((rl, im), -1).contiguous()
+        xs = paddle.einsum("...lmr, mlk->...kmr", x, self.pct.to(x.dtype)).contiguous()
+        # rl = paddle.einsum('...lm, mlk->...km', x[..., 0], self.pct.to(x.dtype) )
+        # im = paddle.einsum('...lm, mlk->...km', x[..., 1], self.pct.to(x.dtype) )
+        # xs = paddle.stack((rl, im), -1).contiguous()
 
         # inverse FFT
-        x = torch.view_as_complex(xs)
+        x = paddle.as_complex(xs)
 
         if self.comm_size_polar > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_polar)
@@ -262,7 +279,7 @@ class DistributedInverseRealSHT(nn.Module):
             x = distributed_transpose_azimuth.apply(x, (1, -1), self.m_shapes)
 
         # apply the inverse (real) FFT
-        x = paddle.fft.irfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = paddle.fft.irfft(x, n=self.nlon, axis=-1, norm="forward")
 
         # transpose: after this, m is split and channels are local
         if self.comm_size_azimuth > 1:
@@ -272,7 +289,7 @@ class DistributedInverseRealSHT(nn.Module):
         return x
 
 
-class DistributedRealVectorSHT(nn.Module):
+class DistributedRealVectorSHT(nn.Layer):
     """
     Defines a module for computing the forward (real) vector SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -282,7 +299,9 @@ class DistributedRealVectorSHT(nn.Module):
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
 
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
         """
         Initializes the vector SHT Layer, precomputing the necessary quadrature weights
 
@@ -306,13 +325,13 @@ class DistributedRealVectorSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, w = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, w = clenshaw_curtiss_weights(nlat, -1, 1)
             # cost, w = fejer2_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         # get the comms grid:
         self.comm_size_polar = polar_group_size()
@@ -338,30 +357,31 @@ class DistributedRealVectorSHT(nn.Module):
         dpct = paddle.to_tensor(dpct)
 
         # combine integration weights, normalization factor in to one:
-        l = torch.arange(0, self.lmax)
-        norm_factor = 1. / l / (l+1)
-        norm_factor[0] = 1.
-        weights = paddle.einsum('dmlk,k,l->dmlk', dpct, weights, norm_factor)
+        l = paddle.arange(0, self.lmax).astype(dpct.dtype)
+        norm_factor = 1.0 / l / (l + 1)
+        norm_factor[0] = 1.0
+        weights = paddle.einsum("dmlk,k,l->dmlk", dpct, weights, norm_factor)
         # since the second component is imaginary, we need to take complex conjugation into account
         weights[1] = -1 * weights[1]
 
         # we need to split in m, pad before:
-        weights = split_tensor_along_dim(weights, dim=1, num_chunks=self.comm_size_azimuth)[self.comm_rank_azimuth]
+        weights = split_tensor_along_dim(weights, dim=1, num_chunks=self.comm_size_azimuth)[
+            self.comm_rank_azimuth
+        ]
 
         # remember quadrature weights
-        self.register_buffer('weights', weights, persistent=False)
+        self.register_buffer("weights", weights, persistable=False)
 
-        
     def extra_repr(self):
         """
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
-        assert(len(x.shape) >= 3)
-        
+        assert len(x.shape) >= 3
+
         # we need to ensure that we can split the channels evenly
         num_chans = x.shape[1]
 
@@ -370,10 +390,10 @@ class DistributedRealVectorSHT(nn.Module):
             x = distributed_transpose_azimuth.apply(x, (1, -1), self.lon_shapes)
 
         # apply real fft in the longitudinal direction: make sure to truncate to nlon
-        x = 2.0 * np.pi * paddle.fft.rfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = 2.0 * np.pi * paddle.fft.rfft(x, n=self.nlon, axis=-1, norm="forward")
 
         # truncate
-        x = x[..., :self.mmax]
+        x = x[..., : self.mmax]
 
         # transpose: after this, m is split and c is local
         if self.comm_size_azimuth > 1:
@@ -385,29 +405,33 @@ class DistributedRealVectorSHT(nn.Module):
             x = distributed_transpose_polar.apply(x, (1, -2), self.lat_shapes)
 
         # do the Legendre-Gauss quadrature
-        x = torch.view_as_real(x)
+        x = paddle.as_real(x)
 
         # create output array
-        xs = torch.zeros_like(x, dtype=x.dtype, device=x.device)
+        xs = paddle.zeros_like(x, dtype=x.dtype)
 
         # contraction - spheroidal component
         # real component
-        xs[..., 0, :, :, 0] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :, 0], self.weights[0].to(xs.dtype)) \
-                              - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :, 1], self.weights[1].to(xs.dtype))
+        xs[..., 0, :, :, 0] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, :, 0], self.weights[0].to(xs.dtype)
+        ) - paddle.einsum("...km,mlk->...lm", x[..., 1, :, :, 1], self.weights[1].to(xs.dtype))
         # imag component
-        xs[..., 0, :, :, 1] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :, 1], self.weights[0].to(xs.dtype)) \
-                              + paddle.einsum('...km,mlk->...lm', x[..., 1, :, :, 0], self.weights[1].to(xs.dtype))
+        xs[..., 0, :, :, 1] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, :, 1], self.weights[0].to(xs.dtype)
+        ) + paddle.einsum("...km,mlk->...lm", x[..., 1, :, :, 0], self.weights[1].to(xs.dtype))
 
         # contraction - toroidal component
         # real component
-        xs[..., 1, :, :, 0] = - paddle.einsum('...km,mlk->...lm', x[..., 0, :, :, 1], self.weights[1].to(xs.dtype)) \
-                              - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :, 0], self.weights[0].to(xs.dtype))
+        xs[..., 1, :, :, 0] = -paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, :, 1], self.weights[1].to(xs.dtype)
+        ) - paddle.einsum("...km,mlk->...lm", x[..., 1, :, :, 0], self.weights[0].to(xs.dtype))
         # imag component
-        xs[..., 1, :, :, 1] =   paddle.einsum('...km,mlk->...lm', x[..., 0, :, :, 0], self.weights[1].to(xs.dtype)) \
-                              - paddle.einsum('...km,mlk->...lm', x[..., 1, :, :, 1], self.weights[0].to(xs.dtype))
+        xs[..., 1, :, :, 1] = paddle.einsum(
+            "...km,mlk->...lm", x[..., 0, :, :, 0], self.weights[1].to(xs.dtype)
+        ) - paddle.einsum("...km,mlk->...lm", x[..., 1, :, :, 1], self.weights[0].to(xs.dtype))
 
         # pad if required
-        x = torch.view_as_complex(xs)
+        x = paddle.as_complex(xs)
 
         # transpose: after this, l is split and c is local
         if self.comm_size_polar > 1:
@@ -417,7 +441,7 @@ class DistributedRealVectorSHT(nn.Module):
         return x
 
 
-class DistributedInverseRealVectorSHT(nn.Module):
+class DistributedInverseRealVectorSHT(nn.Layer):
     """
     Defines a module for computing the inverse (real-valued) vector SHT.
     Precomputes Legendre Gauss nodes, weights and associated Legendre polynomials on these nodes.
@@ -425,7 +449,10 @@ class DistributedInverseRealVectorSHT(nn.Module):
     [1] Schaeffer, N. Efficient spherical harmonic transforms aimed at pseudospectral numerical simulations, G3: Geochemistry, Geophysics, Geosystems.
     [2] Wang, B., Wang, L., Xie, Z.; Accurate calculation of spherical and vector spherical harmonic expansions via spectral element grids; Adv Comput Math.
     """
-    def __init__(self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True):
+
+    def __init__(
+        self, nlat, nlon, lmax=None, mmax=None, grid="lobatto", norm="ortho", csphase=True
+    ):
 
         super().__init__()
 
@@ -441,12 +468,12 @@ class DistributedInverseRealVectorSHT(nn.Module):
             self.lmax = lmax or self.nlat
         elif self.grid == "lobatto":
             cost, _ = lobatto_weights(nlat, -1, 1)
-            self.lmax = lmax or self.nlat-1
+            self.lmax = lmax or self.nlat - 1
         elif self.grid == "equiangular":
             cost, _ = clenshaw_curtiss_weights(nlat, -1, 1)
             self.lmax = lmax or self.nlat
         else:
-            raise(ValueError("Unknown quadrature mode"))
+            raise (ValueError("Unknown quadrature mode"))
 
         self.comm_size_polar = polar_group_size()
         self.comm_rank_polar = polar_group_rank()
@@ -459,27 +486,31 @@ class DistributedInverseRealVectorSHT(nn.Module):
         # determine the dimensions
         self.mmax = mmax or self.nlon // 2 + 1
 
-        # compute splits 
+        # compute splits
         self.lat_shapes = compute_split_shapes(self.nlat, self.comm_size_polar)
         self.lon_shapes = compute_split_shapes(self.nlon, self.comm_size_azimuth)
         self.l_shapes = compute_split_shapes(self.lmax, self.comm_size_polar)
         self.m_shapes = compute_split_shapes(self.mmax, self.comm_size_azimuth)
 
         # compute legende polynomials
-        dpct = _precompute_dlegpoly(self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase)
+        dpct = _precompute_dlegpoly(
+            self.mmax, self.lmax, t, norm=self.norm, inverse=True, csphase=self.csphase
+        )
         dpct = paddle.to_tensor(dpct)
 
         # split in m
-        dpct = split_tensor_along_dim(dpct, dim=1, num_chunks=self.comm_size_azimuth)[self.comm_rank_azimuth]
+        dpct = split_tensor_along_dim(dpct, dim=1, num_chunks=self.comm_size_azimuth)[
+            self.comm_rank_azimuth
+        ]
 
         # register buffer
-        self.register_buffer('dpct', dpct, persistent=False)
+        self.register_buffer("dpct", dpct, persistable=False)
 
     def extra_repr(self):
         """
         Pretty print module
         """
-        return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
+        return f"nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}"
 
     def forward(self, x: paddle.Tensor):
 
@@ -491,31 +522,35 @@ class DistributedInverseRealVectorSHT(nn.Module):
             x = distributed_transpose_polar.apply(x, (1, -2), self.l_shapes)
 
         # Evaluate associated Legendre functions on the output nodes
-        x = torch.view_as_real(x)
+        x = paddle.as_real(x)
 
         # contraction - spheroidal component
         # real component
-        srl =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 0], self.dpct[0].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 1], self.dpct[1].to(x.dtype))
+        srl = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 0], self.dpct[0].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 1], self.dpct[1].to(x.dtype))
         # imag component
-        sim =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 1], self.dpct[0].to(x.dtype)) \
-              + paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 0], self.dpct[1].to(x.dtype))
+        sim = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 1], self.dpct[0].to(x.dtype)
+        ) + paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 0], self.dpct[1].to(x.dtype))
 
         # contraction - toroidal component
         # real component
-        trl = - paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 1], self.dpct[1].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 0], self.dpct[0].to(x.dtype))
+        trl = -paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 1], self.dpct[1].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 0], self.dpct[0].to(x.dtype))
         # imag component
-        tim =   paddle.einsum('...lm,mlk->...km', x[..., 0, :, :, 0], self.dpct[1].to(x.dtype)) \
-              - paddle.einsum('...lm,mlk->...km', x[..., 1, :, :, 1], self.dpct[0].to(x.dtype))
+        tim = paddle.einsum(
+            "...lm,mlk->...km", x[..., 0, :, :, 0], self.dpct[1].to(x.dtype)
+        ) - paddle.einsum("...lm,mlk->...km", x[..., 1, :, :, 1], self.dpct[0].to(x.dtype))
 
         # reassemble
-        s = torch.stack((srl, sim), -1)
-        t = torch.stack((trl, tim), -1)
-        xs = torch.stack((s, t), -4)
+        s = paddle.stack((srl, sim), -1)
+        t = paddle.stack((trl, tim), -1)
+        xs = paddle.stack((s, t), -4)
 
         # convert to complex
-        x = torch.view_as_complex(xs)
+        x = paddle.as_complex(xs)
 
         if self.comm_size_polar > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_polar)
@@ -526,7 +561,7 @@ class DistributedInverseRealVectorSHT(nn.Module):
             x = distributed_transpose_azimuth.apply(x, (1, -1), self.m_shapes)
 
         # apply the inverse (real) FFT
-        x = paddle.fft.irfft(x, n=self.nlon, dim=-1, norm="forward")
+        x = paddle.fft.irfft(x, n=self.nlon, axis=-1, norm="forward")
 
         # transpose: after this, m is split and channels are local
         if self.comm_size_azimuth > 1:

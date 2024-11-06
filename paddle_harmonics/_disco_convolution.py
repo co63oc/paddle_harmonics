@@ -29,12 +29,11 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-import math
-
 import paddle
-
 import triton
 import triton.language as tl
+
+from paddle_harmonics.utils import paddle_aux  # noqa
 
 BLOCK_SIZE_BATCH = 4
 BLOCK_SIZE_NZ = 8
@@ -166,7 +165,7 @@ def _disco_s2_contraction_fwd(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: in
     # check the shapes of all input tensors
     assert len(psi.shape) == 3
     assert len(x.shape) == 4
-    assert psi.is_sparse, "Psi must be a sparse COO tensor"
+    assert psi.is_sparse(), "Psi must be a sparse COO tensor"
 
     # TODO: check that Psi is also coalesced
 
@@ -186,7 +185,7 @@ def _disco_s2_contraction_fwd(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: in
     x = x.reshape(batch_size * n_chans, nlat_in, nlon_in)
 
     # prepare the output tensor
-    y = torch.zeros(batch_size * n_chans, kernel_size, nlat_out, nlon_out, device=x.device, dtype=x.dtype)
+    y = paddle.zeros(shape=[batch_size * n_chans, kernel_size, nlat_out, nlon_out], dtype=x.dtype)
 
     # determine the grid for the computation
     grid = (
@@ -200,24 +199,24 @@ def _disco_s2_contraction_fwd(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: in
         psi.indices(),
         psi.values(),
         nnz,
-        psi.indices().stride(-2),
-        psi.indices().stride(-1),
-        psi.values().stride(-1),
+        psi.indices().get_strides()[-2],
+        psi.indices().get_strides()[-1],
+        psi.values().get_strides()[-1],
         x,
         batch_size * n_chans,
         nlat_in,
         nlon_in,
-        x.stride(0),
-        x.stride(-2),
-        x.stride(-1),
+        x.get_strides()[0],
+        x.get_strides()[-2],
+        x.get_strides()[-1],
         y,
         kernel_size,
         nlat_out,
         nlon_out,
-        y.stride(0),
-        y.stride(1),
-        y.stride(-2),
-        y.stride(-1),
+        y.get_strides()[0],
+        y.get_strides()[1],
+        y.get_strides()[-2],
+        y.get_strides()[-1],
         pscale,
         False,
         BLOCK_SIZE_BATCH,
@@ -248,7 +247,7 @@ def _disco_s2_contraction_bwd(grad_y: paddle.Tensor, psi: paddle.Tensor, nlon_in
     # check the shapes of all input tensors
     assert len(psi.shape) == 3
     assert len(grad_y.shape) == 5
-    assert psi.is_sparse, "psi must be a sparse COO tensor"
+    assert psi.is_sparse(), "psi must be a sparse COO tensor"
 
     # TODO: check that Psi is also coalesced
 
@@ -269,7 +268,7 @@ def _disco_s2_contraction_bwd(grad_y: paddle.Tensor, psi: paddle.Tensor, nlon_in
     grad_y = grad_y.reshape(batch_size * n_chans, kernel_size, nlat_out, nlon_out)
 
     # prepare the output tensor
-    grad_x = torch.zeros(batch_size * n_chans, nlat_in, nlon_in, device=grad_y.device, dtype=grad_y.dtype)
+    grad_x = paddle.zeros(shape=[batch_size * n_chans, nlat_in, nlon_in], dtype=grad_y.dtype)
 
     # determine the grid for the computation
     grid = (
@@ -283,24 +282,24 @@ def _disco_s2_contraction_bwd(grad_y: paddle.Tensor, psi: paddle.Tensor, nlon_in
         psi.indices(),
         psi.values(),
         nnz,
-        psi.indices().stride(-2),
-        psi.indices().stride(-1),
-        psi.values().stride(-1),
+        psi.indices().get_strides()[-2],
+        psi.indices().get_strides()[-1],
+        psi.values().get_strides()[-1],
         grad_x,
         batch_size * n_chans,
         nlat_in,
         nlon_in,
-        grad_x.stride(0),
-        grad_x.stride(-2),
-        grad_x.stride(-1),
+        grad_x.get_strides()[0],
+        grad_x.get_strides()[-2],
+        grad_x.get_strides()[-1],
         grad_y,
         kernel_size,
         nlat_out,
         nlon_out,
-        grad_y.stride(0),
-        grad_y.stride(1),
-        grad_y.stride(-2),
-        grad_y.stride(-1),
+        grad_y.get_strides()[0],
+        grad_y.get_strides()[1],
+        grad_y.get_strides()[-2],
+        grad_y.get_strides()[-1],
         pscale,
         True,
         BLOCK_SIZE_BATCH,
@@ -314,9 +313,9 @@ def _disco_s2_contraction_bwd(grad_y: paddle.Tensor, psi: paddle.Tensor, nlon_in
     return grad_x
 
 
-class _DiscoS2ContractionTriton(torch.autograd.Function):
+class _DiscoS2ContractionTriton(paddle.autograd.PyLayer):
     """
-    Helper function to make the triton implementation work with PyTorch autograd functionality
+    Helper function to make the triton implementation work with Paddle autograd functionality
     """
 
     @staticmethod
@@ -328,17 +327,19 @@ class _DiscoS2ContractionTriton(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        (psi,) = ctx.saved_tensors
+        (psi,) = ctx.saved_tensor()
         grad_input = _disco_s2_contraction_bwd(grad_output, psi, ctx.nlon_in)
-        grad_x = grad_psi = None
+        grad_x = grad_psi = None  # noqa
 
-        return grad_input, None, None
+        # return grad_input, None, None
+        return grad_input, None
 
-class _DiscoS2TransposeContractionTriton(torch.autograd.Function):
+
+class _DiscoS2TransposeContractionTriton(paddle.autograd.PyLayer):
     """
-    Helper function to make the triton implementation work with PyTorch autograd functionality
+    Helper function to make the triton implementation work with Paddle autograd functionality
     """
-    
+
     @staticmethod
     def forward(ctx, x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
         ctx.save_for_backward(psi)
@@ -348,21 +349,23 @@ class _DiscoS2TransposeContractionTriton(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        (psi,) = ctx.saved_tensors
+        (psi,) = ctx.saved_tensor()
         grad_input = _disco_s2_contraction_fwd(grad_output, psi, ctx.nlon_in)
-        grad_x = grad_psi = None
+        grad_x = grad_psi = None  # noqa
 
-        return grad_input, None, None
+        # return grad_input, None, None
+        return grad_input, None
 
 
 def _disco_s2_contraction_triton(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
     return _DiscoS2ContractionTriton.apply(x, psi, nlon_out)
 
+
 def _disco_s2_transpose_contraction_triton(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
     return _DiscoS2TransposeContractionTriton.apply(x, psi, nlon_out)
 
 
-def _disco_s2_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
+def _disco_s2_contraction_paddle(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
     """
     Reference implementation of the custom contraction as described in [1]. This requires repeated
     shifting of the input tensor, which can potentially be costly. For an efficient implementation
@@ -370,7 +373,7 @@ def _disco_s2_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: 
     """
     assert len(psi.shape) == 3
     assert len(x.shape) == 4
-    psi = psi.to(x.device)
+    # psi = psi.to(device=x.place)
 
     batch_size, n_chans, nlat_in, nlon_in = x.shape
     kernel_size, nlat_out, _ = psi.shape
@@ -381,24 +384,24 @@ def _disco_s2_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: 
     pscale = nlon_in // nlon_out
 
     # add a dummy dimension for nkernel and move the batch and channel dims to the end
-    x = x.reshape(1, batch_size * n_chans, nlat_in, nlon_in).permute(0, 2, 3, 1)
-    x = x.expand(kernel_size, -1, -1, -1)
+    x = x.reshape(1, batch_size * n_chans, nlat_in, nlon_in).transpose([0, 2, 3, 1])
+    x = x.expand(shape=[kernel_size, -1, -1, -1])
 
-    y = torch.zeros(nlon_out, kernel_size, nlat_out, batch_size * n_chans, device=x.device, dtype=x.dtype)
+    y = paddle.zeros(shape=[nlon_out, kernel_size, nlat_out, batch_size * n_chans], dtype=x.dtype)
 
     for pout in range(nlon_out):
         # sparse contraction with psi
-        y[pout] = torch.bmm(psi, x.reshape(kernel_size, nlat_in * nlon_in, -1))
+        y[pout] = paddle_aux.bmm_fix(psi, x.reshape(kernel_size, nlat_in * nlon_in, -1))
         # we need to repeatedly roll the input tensor to faciliate the shifted multiplication
-        x = torch.roll(x, -pscale, dims=2)
+        x = paddle.roll(x, -pscale, axis=2)
 
     # reshape y back to expose the correct dimensions
-    y = y.permute(3, 1, 2, 0).reshape(batch_size, n_chans, kernel_size, nlat_out, nlon_out)
+    y = y.transpose([3, 1, 2, 0]).reshape(batch_size, n_chans, kernel_size, nlat_out, nlon_out)
 
     return y
 
 
-def _disco_s2_transpose_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
+def _disco_s2_transpose_contraction_paddle(x: paddle.Tensor, psi: paddle.Tensor, nlon_out: int):
     """
     Reference implementation of the custom contraction as described in [1]. This requires repeated
     shifting of the input tensor, which can potentially be costly. For an efficient implementation
@@ -406,7 +409,7 @@ def _disco_s2_transpose_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, 
     """
     assert len(psi.shape) == 3
     assert len(x.shape) == 5
-    psi = psi.to(x.device)
+    # psi = psi.to(x.place)
 
     batch_size, n_chans, kernel_size, nlat_in, nlon_in = x.shape
     kernel_size, _, n_out = psi.shape
@@ -424,26 +427,33 @@ def _disco_s2_transpose_contraction_torch(x: paddle.Tensor, psi: paddle.Tensor, 
     # flip the axis of longitudes
     pout = nlon_out - 1 - pout
     tin = inz[1]
-    inz = torch.stack([inz[0], tout, tin*nlon_out + pout], dim=0)
-    psi_mod = torch.sparse_coo_tensor(inz, psi.values(), size=(kernel_size, nlat_out, nlat_in*nlon_out))
+    inz = paddle.stack([inz[0], tout, tin * nlon_out + pout], axis=0)
+    psi_mod = paddle.sparse.sparse_coo_tensor(
+        inz, psi.values(), shape=(kernel_size, nlat_out, nlat_in * nlon_out)
+    )
 
     # interleave zeros along the longitude dimension to allow for fractional offsets to be considered
-    x_ext = torch.zeros(kernel_size, nlat_in, nlon_out, batch_size * n_chans, device=x.device, dtype=x.dtype)
-    x_ext[:, :, ::pscale, :] = x.reshape(batch_size * n_chans, kernel_size, nlat_in, nlon_in).permute(1, 2, 3, 0)
+    x_ext = paddle.zeros(
+        shape=[kernel_size, nlat_in, nlon_out, batch_size * n_chans], dtype=x.dtype
+    )
+    x_ext[:, :, ::pscale, :] = x.reshape(
+        batch_size * n_chans, kernel_size, nlat_in, nlon_in
+    ).transpose([1, 2, 3, 0])
     # we need to go backwards through the vector, so we flip the axis
     x_ext = x_ext.contiguous()
 
-    y = torch.zeros(kernel_size, nlon_out, nlat_out, batch_size * n_chans, device=x.device, dtype=x.dtype)
+    y = paddle.zeros(shape=[kernel_size, nlon_out, nlat_out, batch_size * n_chans], dtype=x.dtype)
 
     for pout in range(nlon_out):
         # we need to repeatedly roll the input tensor to faciliate the shifted multiplication
         # TODO: double-check why this has to happen first
-        x_ext = torch.roll(x_ext, -1, dims=2)
+        x_ext = paddle.roll(x_ext, -1, axis=2)
         # sparse contraction with the modified psi
-        y[:, pout, :, :] = torch.bmm(psi_mod, x_ext.reshape(kernel_size, nlat_in * nlon_out, -1))
+        y[:, pout, :, :] = paddle_aux.bmm_fix(
+            psi_mod, x_ext.reshape(kernel_size, nlat_in * nlon_out, -1)
+        )
 
     # sum over the kernel dimension and reshape to the correct output size
-    y = y.sum(dim=0).permute(2, 1, 0).reshape(batch_size, n_chans, nlat_out, nlon_out)
+    y = y.sum(axis=0).transpose([2, 1, 0]).reshape(batch_size, n_chans, nlat_out, nlon_out)
 
     return y
-

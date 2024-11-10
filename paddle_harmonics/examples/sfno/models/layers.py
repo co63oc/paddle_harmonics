@@ -41,7 +41,6 @@ from paddle_harmonics import *  # noqa
 # # import FactorizedTensor from tensorly for tensorized operations
 # import tensorly as tl
 # from tensorly.plugins import use_opt_einsum
-# tl.set_backend("pytorch")
 # use_opt_einsum("optimal")
 from paddle_harmonics.utils.factorized_tensor import FactorizedTensor
 
@@ -237,7 +236,7 @@ class InverseRealFFT2(nn.Layer):
 class SpectralConvS2(nn.Layer):
     """
     Spectral Convolution according to Driscoll & Healy. Designed for convolutions on the two-sphere S2
-    using the Spherical Harmonic Transforms in torch-harmonics, but supports convolutions on the periodic
+    using the Spherical Harmonic Transforms in paddle-harmonics, but supports convolutions on the periodic
     domain via the RealFFT2 and InverseRealFFT2 wrappers.
     """
 
@@ -327,7 +326,7 @@ class SpectralConvS2(nn.Layer):
 
 class FactorizedSpectralConvS2(nn.Layer):
     """
-    Factorized version of SpectralConvS2. Uses tensorly-torch to keep the weights factorized
+    Factorized version of SpectralConvS2. Uses tensorly to keep the weights factorized
     """
 
     def __init__(

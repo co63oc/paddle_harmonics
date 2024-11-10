@@ -118,7 +118,6 @@ class PdeDataset(paddle.io.Dataset):
 
         # self.stream.synchronize()
 
-        # with torch.inference_mode():
         with paddle.no_grad():
             inp, tar = self._get_sample()
 

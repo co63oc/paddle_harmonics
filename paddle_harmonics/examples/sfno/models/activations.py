@@ -85,8 +85,8 @@ class ComplexReLU(nn.Layer):
 
         # elif self.mode == "halfplane":
         #     # bias is an angle parameter in this case
-        #     modified_angle = torch.angle(z) - self.bias
-        #     condition = torch.logical_and( (0. <= modified_angle), (modified_angle < np.pi/2.) )
+        #     modified_angle = paddle.angle(z) - self.bias
+        #     condition = paddle.logical_and( (0. <= modified_angle), (modified_angle < np.pi/2.) )
         #     out = paddle.where(condition, z, self.negative_slope * z)
 
         elif self.mode == "real":

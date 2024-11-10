@@ -112,7 +112,7 @@ class distributed_transpose_azimuth(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, x, dims, dim1_split_sizes):
 
-        # WAR for a potential contig check torch bug for channels last contig tensors
+        # WAR for a potential contiguous check bug for channels last contiguous tensors
         x = x.contiguous()
         xlist, dim0_split_sizes, _ = _transpose(
             x, dims[0], dims[1], dim1_split_sizes, group=azimuth_group()
@@ -127,7 +127,7 @@ class distributed_transpose_azimuth(paddle.autograd.PyLayer):
 
         dims = ctx.dims
         dim0_split_sizes = ctx.dim0_split_sizes
-        # WAR for a potential contig check torch bug for channels last contig tensors
+        # WAR for a potential contiguous check bug for channels last contiguous tensors
         go = go.contiguous()
         gilist, _, _ = _transpose(go, dims[1], dims[0], dim0_split_sizes, group=azimuth_group())
         gi = paddle.concat(gilist, axis=dims[0]).contiguous()
@@ -138,7 +138,7 @@ class distributed_transpose_polar(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, x, dim, dim1_split_sizes):
 
-        # WAR for a potential contig check torch bug for channels last contig tensors
+        # WAR for a potential contiguous check bug for channels last contiguous tensors
         x = x.contiguous()
         xlist, dim0_split_sizes, _ = _transpose(
             x, dim[0], dim[1], dim1_split_sizes, group=polar_group()
@@ -153,7 +153,7 @@ class distributed_transpose_polar(paddle.autograd.PyLayer):
 
         dim = ctx.dim
         dim0_split_sizes = ctx.dim0_split_sizes
-        # WAR for a potential contig check torch bug for channels last contig tensors
+        # WAR for a potential contiguous check bug for channels last contiguous tensors
         go = go.contiguous()
         gilist, _, _ = _transpose(go, dim[1], dim[0], dim0_split_sizes, group=polar_group())
         gi = paddle.concat(gilist, axis=dim[0]).contiguous()
